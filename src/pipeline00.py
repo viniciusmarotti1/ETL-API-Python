@@ -1,11 +1,21 @@
 import time
 import os
 import requests
+import logging
+import logfire
 from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database import Base, BitcoinPreco
 from dotenv import load_dotenv
+from logging import basicConfig, getLogger
+
+logfire.configure()
+basicConfig(handlers=[logfire.LogfireLoggingHandler()])
+logger = getLogger(__name__)
+logger.setLevel(logging.INFO)
+logfire.instrument_requests()
+logfire.instrument_sqlalchemy()
 
 load_dotenv()
 
@@ -25,13 +35,17 @@ Session = sessionmaker(bind=engine)
 
 def create_table():
     Base.metadata.create_all(engine)
-    print("Create table with successful!")
+    logger.info("Tabela criada/verificada com sucesso!")
 
 def extract_bitcoin_data():
     url = "https://api.coinbase.com/v2/prices/spot"
 
     response = requests.get(url) 
-    return response.json()
+    if response.status_code == 200:
+        return response.json()
+    else:
+        logger.error(f"Erro na API: {response.status_code}")
+        return None
 
 def transform_bitcoin_data(json_data):
     value = float(json_data["data"]["amount"])
@@ -53,7 +67,28 @@ def save_data_postgres(data):
     session.add(novo_registro)
     session.commit()
     session.close()
-    print(f"[{data['timestamp']}] Save data on PostgreSQL!")
+    logger.info(f"[{data['timestamp']}] Save data on PostgreSQL!")
+
+def pipeline_bitcoin():
+    with logfire.span("Executando pipeline ETL Bitcoin"):
+        
+        with logfire.span("Extrair Dados da API Coinbase"):
+            json_data = extract_bitcoin_data()
+        
+        if not json_data:
+            logger.error("Falha na extração dos dados. Abortando pipeline.")
+            return
+        
+        with logfire.span("Tratar Dados do Bitcoin"):
+            transform_data = transform_bitcoin_data(json_data)
+        
+        with logfire.span("Salvar Dados no Postgres"):
+            save_data_postgres(transform_data)
+
+        logger.info(
+            f"Pipeline finalizada com sucesso!"
+        )
+
 
 if __name__ == "__main__":
     create_table()
